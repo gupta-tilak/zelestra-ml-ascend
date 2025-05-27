@@ -41,7 +41,6 @@ class ImputationPipeline:
 
         # Categorical fills
         self.error_code_fill = df['error_code'].mode()[0] if 'error_code' in df else 'NO_ERROR'
-
         self.installation_type_fill = df['installation_type'].mode()[0] if 'installation_type' in df else 'UNKNOWN'
 
         return self
@@ -75,7 +74,7 @@ class ImputationPipeline:
 
         if 'installation_type' in df:
             df['installation_type'] = df['installation_type'].fillna(self.installation_type_fill)
-            
+
         return df
 
     def fit_transform(self, df):
