@@ -75,9 +75,9 @@ class SolarFeatureEngineering:
         
         # ===== ADDITIONAL ADVANCED FEATURE ENGINEERING =====
         
-        # Box-Cox transformations for skewed features
-        if 'irradiance' in df.columns:
-            df_engineered['irradiance_boxcox'], _ = stats.boxcox(df_engineered['irradiance'] + 1)
+        # # Box-Cox transformations for skewed features
+        # if 'irradiance' in df.columns:
+        #     df_engineered['irradiance_boxcox'], _ = stats.boxcox(df_engineered['irradiance'] + 1)
         
         if 'power_output' in df_engineered.columns:
             df_engineered['power_output_log'] = np.log1p(df_engineered['power_output'])
