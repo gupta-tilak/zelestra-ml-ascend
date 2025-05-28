@@ -40,7 +40,7 @@ class ImputationPipeline:
         self.knn_imputer.fit(df[self.knn_cols])
 
         # Categorical fills
-        self.error_code_fill = df['error_code'].mode()[0] if 'error_code' in df else 'NO_ERROR'
+        self.error_code_fill = df['error_code'].fillna('NO_ERROR')
         self.installation_type_fill = df['installation_type'].mode()[0] if 'installation_type' in df else 'UNKNOWN'
 
         return self
@@ -70,7 +70,7 @@ class ImputationPipeline:
 
         # Categorical fills
         if 'error_code' in df:
-            df['error_code'] = df['error_code'].fillna(self.error_code_fill)
+            df['error_code'] = df['error_code'].fillna('NO_ERROR')
 
         if 'installation_type' in df:
             df['installation_type'] = df['installation_type'].fillna(self.installation_type_fill)
