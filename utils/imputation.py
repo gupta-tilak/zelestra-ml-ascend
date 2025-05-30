@@ -3,6 +3,8 @@ import pandas as pd
 from sklearn.linear_model import LinearRegression
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer, KNNImputer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import LabelEncoder
 
 class ImputationPipeline:
     
@@ -12,10 +14,19 @@ class ImputationPipeline:
         self.mice_imputer = None
         self.knn_imputer = None
         self.error_code_fill = None
-        self.installation_type_fill = None
-        self.cloud_coverage_median = None  # Store median for prediction pipeline
+        self.installation_type_classifier = None  # Changed from fill to classifier
+        self.installation_type_features = None    # Store features used for prediction
+        self.installation_type_encoder = None     # For encoding categorical features
+        self.cloud_coverage_median = None
         self.mice_cols = ['irradiance', 'voltage', 'current', 'panel_age', 'cloud_coverage', 'maintenance_count','soiling_ratio']
         self.knn_cols = ['wind_speed', 'pressure', 'temperature', 'module_temperature', 'humidity']
+        
+        # Features to use for installation_type prediction (customize based on your dataset)
+        self.installation_type_predictor_cols = [
+            'irradiance', 'voltage', 'current', 'panel_age', 'wind_speed', 
+            'pressure', 'temperature', 'module_temperature', 'humidity',
+            'cloud_coverage', 'maintenance_count', 'soiling_ratio'
+        ]
 
     def _apply_training_cleaning_rules(self, df):
         """Apply cleaning rules for training data - drops rows that don't meet criteria"""
@@ -96,6 +107,26 @@ class ImputationPipeline:
         
         return df_cleaned
 
+    def _prepare_installation_type_features(self, df):
+        """Prepare features for installation_type prediction"""
+        # Get available predictor columns
+        available_cols = [col for col in self.installation_type_predictor_cols if col in df.columns]
+        
+        if not available_cols:
+            return None, []
+        
+        feature_df = df[available_cols].copy()
+        
+        # Handle any remaining missing values in predictor columns
+        # Use simple forward fill or median for numerical columns
+        for col in feature_df.columns:
+            if feature_df[col].dtype in ['int64', 'float64']:
+                feature_df[col] = feature_df[col].fillna(feature_df[col].median())
+            else:
+                feature_df[col] = feature_df[col].fillna(feature_df[col].mode()[0] if len(feature_df[col].mode()) > 0 else 'UNKNOWN')
+        
+        return feature_df, available_cols
+
     def fit(self, df, is_training=True):
         """
         Fit the imputation pipeline
@@ -142,9 +173,43 @@ class ImputationPipeline:
         # Categorical fills
         if 'error_code' in df.columns:
             self.error_code_fill = 'NO_ERROR'
-            
+
+        # Fit installation_type classifier
         if 'installation_type' in df.columns:
-            self.installation_type_fill = df['installation_type'].mode()[0] if len(df['installation_type'].mode()) > 0 else 'UNKNOWN'
+            # Get rows with non-null installation_type for training
+            non_null_mask = df['installation_type'].notna()
+            
+            if non_null_mask.sum() > 0:  # Check if we have any non-null values
+                # Prepare features for training the classifier
+                feature_df, available_cols = self._prepare_installation_type_features(df)
+                
+                if feature_df is not None and len(available_cols) > 0:
+                    # Store the features used
+                    self.installation_type_features = available_cols
+                    
+                    # Get training data
+                    X_train = feature_df.loc[non_null_mask]
+                    y_train = df.loc[non_null_mask, 'installation_type']
+                    
+                    # Train Random Forest classifier
+                    self.installation_type_classifier = RandomForestClassifier(
+                        n_estimators=100, 
+                        random_state=42, 
+                        max_depth=10,
+                        min_samples_split=10,
+                        min_samples_leaf=5
+                    )
+                    self.installation_type_classifier.fit(X_train, y_train)
+                    
+                    print(f"Trained installation_type classifier using features: {available_cols}")
+                    print(f"Training accuracy: {self.installation_type_classifier.score(X_train, y_train):.3f}")
+                else:
+                    print("Warning: No suitable features found for installation_type prediction. Will use mode fallback.")
+                    # Fallback to mode
+                    self.installation_type_fill = df['installation_type'].mode()[0] if len(df['installation_type'].mode()) > 0 else 'UNKNOWN'
+            else:
+                print("Warning: No non-null installation_type values found for training classifier.")
+                self.installation_type_fill = 'UNKNOWN'
 
         # Store cloud coverage median if not already stored and we have valid data
         if self.cloud_coverage_median is None and 'cloud_coverage' in df.columns:
@@ -202,8 +267,32 @@ class ImputationPipeline:
         if 'error_code' in df.columns and self.error_code_fill is not None:
             df['error_code'] = df['error_code'].fillna(self.error_code_fill)
 
-        if 'installation_type' in df.columns and self.installation_type_fill is not None:
-            df['installation_type'] = df['installation_type'].fillna(self.installation_type_fill)
+        # Predictive imputation for installation_type
+        if 'installation_type' in df.columns:
+            missing_mask = df['installation_type'].isna()
+            
+            if missing_mask.any() and self.installation_type_classifier is not None:
+                # Prepare features for prediction
+                feature_df, _ = self._prepare_installation_type_features(df)
+                
+                if feature_df is not None:
+                    # Get features for missing values
+                    X_missing = feature_df.loc[missing_mask, self.installation_type_features]
+                    
+                    # Predict missing values
+                    predicted_values = self.installation_type_classifier.predict(X_missing)
+                    df.loc[missing_mask, 'installation_type'] = predicted_values
+                    
+                    print(f"Predicted {missing_mask.sum()} missing installation_type values using classifier")
+                else:
+                    print("Warning: Could not prepare features for installation_type prediction")
+                    # Fallback to mode if available
+                    if hasattr(self, 'installation_type_fill') and self.installation_type_fill is not None:
+                        df['installation_type'] = df['installation_type'].fillna(self.installation_type_fill)
+            elif missing_mask.any() and hasattr(self, 'installation_type_fill') and self.installation_type_fill is not None:
+                # Fallback to mode imputation
+                df['installation_type'] = df['installation_type'].fillna(self.installation_type_fill)
+                print(f"Used mode fallback for {missing_mask.sum()} missing installation_type values")
 
         return df
 
