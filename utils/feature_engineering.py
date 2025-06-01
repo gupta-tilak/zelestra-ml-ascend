@@ -69,88 +69,84 @@ class SolarFeatureEngineering:
             df_engineered['effective_module_temp'] = (df_engineered['module_temperature'] - 
                                                     df_engineered['wind_cooling_effect'])
         
-        # Installation type encoding (this creates installation_type_tracking)
-        if 'installation_type' in df.columns:
-            df_engineered['installation_type_tracking'] = (df_engineered['installation_type'] == 'tracking').astype(int)
-        
         # # ===== ADDITIONAL ADVANCED FEATURE ENGINEERING =====
         
-        if 'power_output' in df_engineered.columns:
-            df_engineered['power_output_log'] = np.log1p(df_engineered['power_output'])
+        # if 'power_output' in df_engineered.columns:
+        #     df_engineered['power_output_log'] = np.log1p(df_engineered['power_output'])
         
-        # Robust scaling for outlier-prone features
-        if 'temp_difference' in df_engineered.columns:
-            scaler = RobustScaler()
-            df_engineered['temp_difference_robust'] = scaler.fit_transform(
-                df_engineered[['temp_difference']]).flatten()
+        # # Robust scaling for outlier-prone features
+        # if 'temp_difference' in df_engineered.columns:
+        #     scaler = RobustScaler()
+        #     df_engineered['temp_difference_robust'] = scaler.fit_transform(
+        #         df_engineered[['temp_difference']]).flatten()
         
-        # Winsorization for extreme values
-        if 'irradiance' in df.columns:
-            df_engineered['irradiance_winsorized'] = np.clip(df_engineered['irradiance'], 
-                                                           np.percentile(df_engineered['irradiance'], 1),
-                                                           np.percentile(df_engineered['irradiance'], 99))
+        # # Winsorization for extreme values
+        # if 'irradiance' in df.columns:
+        #     df_engineered['irradiance_winsorized'] = np.clip(df_engineered['irradiance'], 
+        #                                                    np.percentile(df_engineered['irradiance'], 1),
+        #                                                    np.percentile(df_engineered['irradiance'], 99))
         
-        # Theoretical maximum power calculation
-        required_cols = ['irradiance_normalized', 'temp_coefficient_effect', 'age_degradation_factor', 'soiling_ratio']
-        if all(col in df_engineered.columns for col in required_cols):
-            df_engineered['theoretical_max_power'] = (df_engineered['irradiance_normalized'] * 
-                                                     df_engineered['temp_coefficient_effect'] * 
-                                                     df_engineered['age_degradation_factor'] * 
-                                                     df_engineered['soiling_ratio'])
+        # # Theoretical maximum power calculation
+        # required_cols = ['irradiance_normalized', 'temp_coefficient_effect', 'age_degradation_factor', 'soiling_ratio']
+        # if all(col in df_engineered.columns for col in required_cols):
+        #     df_engineered['theoretical_max_power'] = (df_engineered['irradiance_normalized'] * 
+        #                                              df_engineered['temp_coefficient_effect'] * 
+        #                                              df_engineered['age_degradation_factor'] * 
+        #                                              df_engineered['soiling_ratio'])
         
-        # Performance deviation metrics
-        if 'power_output' in df_engineered.columns and 'theoretical_max_power' in df_engineered.columns:
-            df_engineered['performance_deviation'] = (df_engineered['power_output'] - 
-                                                     df_engineered['theoretical_max_power'])
-            # Avoid division by zero
-            df_engineered['efficiency_ratio'] = np.where(
-                df_engineered['theoretical_max_power'] != 0,
-                df_engineered['power_output'] / df_engineered['theoretical_max_power'],
-                0
-            )
+        # # Performance deviation metrics
+        # if 'power_output' in df_engineered.columns and 'theoretical_max_power' in df_engineered.columns:
+        #     df_engineered['performance_deviation'] = (df_engineered['power_output'] - 
+        #                                              df_engineered['theoretical_max_power'])
+        #     # Avoid division by zero
+        #     df_engineered['efficiency_ratio'] = np.where(
+        #         df_engineered['theoretical_max_power'] != 0,
+        #         df_engineered['power_output'] / df_engineered['theoretical_max_power'],
+        #         0
+        #     )
         
-        # String-level aggregations
-        if 'string_id' in df.columns and 'power_output' in df_engineered.columns:
-            string_stats = df_engineered.groupby('string_id')['power_output'].agg(['mean', 'std', 'min', 'max'])
-            string_stats.columns = ['power_output_string_mean', 'power_output_string_std', 
-                                   'power_output_string_min', 'power_output_string_max']
-            df_engineered = df_engineered.merge(string_stats, left_on='string_id', right_index=True, how='left')
-            df_engineered['power_vs_string_mean'] = (df_engineered['power_output'] - 
-                                                   df_engineered['power_output_string_mean'])
+        # # String-level aggregations
+        # if 'string_id' in df.columns and 'power_output' in df_engineered.columns:
+        #     string_stats = df_engineered.groupby('string_id')['power_output'].agg(['mean', 'std', 'min', 'max'])
+        #     string_stats.columns = ['power_output_string_mean', 'power_output_string_std', 
+        #                            'power_output_string_min', 'power_output_string_max']
+        #     df_engineered = df_engineered.merge(string_stats, left_on='string_id', right_index=True, how='left')
+        #     df_engineered['power_vs_string_mean'] = (df_engineered['power_output'] - 
+        #                                            df_engineered['power_output_string_mean'])
         
-        # Error frequency and patterns
-        if 'error_code' in df.columns:
-            df_engineered['error_indicator'] = (df_engineered['error_code'] != 0).astype(int)
+        # # Error frequency and patterns
+        # if 'error_code' in df.columns:
+        #     df_engineered['error_indicator'] = (df_engineered['error_code'] != 0).astype(int)
             
-            if 'string_id' in df.columns:
-                df_engineered['consecutive_errors'] = df_engineered.groupby('string_id')['error_indicator'].transform(
-                    lambda x: x.groupby((x != x.shift()).cumsum()).cumsum())
+        #     if 'string_id' in df.columns:
+        #         df_engineered['consecutive_errors'] = df_engineered.groupby('string_id')['error_indicator'].transform(
+        #             lambda x: x.groupby((x != x.shift()).cumsum()).cumsum())
         
-        # Performance anomaly detection
-        anomaly_features = ['power_output', 'irradiance', 'module_temperature']
-        available_anomaly_features = [col for col in anomaly_features if col in df_engineered.columns]
+        # # Performance anomaly detection
+        # anomaly_features = ['power_output', 'irradiance', 'module_temperature']
+        # available_anomaly_features = [col for col in anomaly_features if col in df_engineered.columns]
         
-        if len(available_anomaly_features) >= 2:
-            iso_forest = IsolationForest(contamination=0.1, random_state=42)
-            df_engineered['anomaly_score'] = iso_forest.fit_predict(
-                df_engineered[available_anomaly_features])
+        # if len(available_anomaly_features) >= 2:
+        #     iso_forest = IsolationForest(contamination=0.1, random_state=42)
+        #     df_engineered['anomaly_score'] = iso_forest.fit_predict(
+        #         df_engineered[available_anomaly_features])
         
-        # Cluster similar operating conditions
-        clustering_features = ['irradiance_normalized', 'temp_difference', 'environmental_stress']
-        available_clustering_features = [col for col in clustering_features if col in df_engineered.columns]
+        # # Cluster similar operating conditions
+        # clustering_features = ['irradiance_normalized', 'temp_difference', 'environmental_stress']
+        # available_clustering_features = [col for col in clustering_features if col in df_engineered.columns]
         
-        if len(available_clustering_features) >= 2:
-            # Handle missing values for clustering
-            clustering_data = df_engineered[available_clustering_features].fillna(df_engineered[available_clustering_features].mean())
+        # if len(available_clustering_features) >= 2:
+        #     # Handle missing values for clustering
+        #     clustering_data = df_engineered[available_clustering_features].fillna(df_engineered[available_clustering_features].mean())
             
-            kmeans = KMeans(n_clusters=5, random_state=42, n_init=10)
-            df_engineered['operating_regime'] = kmeans.fit_predict(clustering_data)
+        #     kmeans = KMeans(n_clusters=5, random_state=42, n_init=10)
+        #     df_engineered['operating_regime'] = kmeans.fit_predict(clustering_data)
             
-            # Regime-specific performance metrics
-            if 'power_output' in df_engineered.columns:
-                regime_performance = df_engineered.groupby('operating_regime')['power_output'].mean()
-                df_engineered['regime_expected_power'] = df_engineered['operating_regime'].map(regime_performance)
-                df_engineered['regime_performance_deviation'] = (df_engineered['power_output'] - 
-                                                               df_engineered['regime_expected_power'])
+        #     # Regime-specific performance metrics
+        #     if 'power_output' in df_engineered.columns:
+        #         regime_performance = df_engineered.groupby('operating_regime')['power_output'].mean()
+        #         df_engineered['regime_expected_power'] = df_engineered['operating_regime'].map(regime_performance)
+        #         df_engineered['regime_performance_deviation'] = (df_engineered['power_output'] - 
+        #                                                        df_engineered['regime_expected_power'])
         
         return df_engineered

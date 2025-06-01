@@ -13,6 +13,9 @@ from sklearn.neighbors import KNeighborsRegressor
 from xgboost import XGBRegressor
 from lightgbm import LGBMRegressor
 from catboost import CatBoostRegressor
+import optuna
+from optuna.integration import LightGBMPruningCallback
+from optuna.visualization import plot_optimization_history, plot_param_importances
 
 # Neural Network imports
 import tensorflow as tf
@@ -33,6 +36,106 @@ warnings.filterwarnings('ignore')
 # Set random seeds for reproducibility
 tf.random.set_seed(42)
 np.random.seed(42)
+
+def create_optuna_objective(model_name, X_train, y_train, cv=5):
+    """
+    Create an Optuna objective function for a given model
+    
+    Parameters:
+    -----------
+    model_name : str
+        Name of the model to optimize
+    X_train : array-like
+        Training features
+    y_train : array-like
+        Training target
+    cv : int
+        Number of cross-validation folds
+        
+    Returns:
+    --------
+    objective : callable
+        Optuna objective function
+    """
+    def objective(trial):
+        if model_name == 'Random Forest':
+            params = {
+                'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+                'max_depth': trial.suggest_int('max_depth', 5, 30),
+                'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
+                'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10),
+                'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2'])
+            }
+            model = RandomForestRegressor(**params, random_state=42, n_jobs=-1)
+            
+        elif model_name == 'XGBoost':
+            params = {
+                'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+                'max_depth': trial.suggest_int('max_depth', 3, 12),
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+                'min_child_weight': trial.suggest_int('min_child_weight', 1, 7)
+            }
+            model = XGBRegressor(**params, random_state=42)
+            
+        elif model_name == 'LightGBM':
+            params = {
+                'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+                'max_depth': trial.suggest_int('max_depth', 3, 12),
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                'num_leaves': trial.suggest_int('num_leaves', 20, 100),
+                'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0)
+            }
+            model = LGBMRegressor(**params, random_state=42, verbose=-1)
+            
+        elif model_name == 'Gradient Boosting':
+            params = {
+                'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+                'max_depth': trial.suggest_int('max_depth', 3, 10),
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+                'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
+                'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10)
+            }
+            model = GradientBoostingRegressor(**params, random_state=42)
+            
+        elif model_name == 'Ridge':
+            params = {
+                'alpha': trial.suggest_float('alpha', 0.1, 100.0, log=True)
+            }
+            model = Ridge(**params, random_state=42)
+            
+        elif model_name == 'Lasso':
+            params = {
+                'alpha': trial.suggest_float('alpha', 0.001, 1.0, log=True)
+            }
+            model = Lasso(**params, random_state=42)
+            
+        elif model_name == 'ANN':
+            params = {
+                'neurons': trial.suggest_int('neurons', 32, 256),
+                'layers': trial.suggest_int('layers', 2, 5),
+                'dropout_rate': trial.suggest_float('dropout_rate', 0.1, 0.5),
+                'learning_rate': trial.suggest_float('learning_rate', 0.0001, 0.01, log=True),
+                'l2_reg': trial.suggest_float('l2_reg', 0.0001, 0.1, log=True),
+                'batch_size': trial.suggest_int('batch_size', 16, 128)
+            }
+            model = ANNRegressor(**params, verbose=0)
+            
+        else:
+            raise ValueError(f"Model {model_name} not supported for Optuna optimization")
+        
+        # Use cross-validation to evaluate the model
+        scores = cross_val_score(model, X_train, y_train, 
+                               cv=cv, scoring='neg_root_mean_squared_error',
+                               n_jobs=-1)
+        
+        # Return the mean RMSE (negative because Optuna minimizes)
+        return -scores.mean()
+    
+    return objective
 
 class ANNRegressor:
     """
@@ -520,131 +623,106 @@ class SolarPanelModelSelector:
         
         return self.results
 
-    def get_bayesian_search_spaces(self):
+    def hyperparameter_tuning(self, top_n=5, n_trials=50):
         """
-        Define Bayesian optimization search spaces for models
+        Perform hyperparameter tuning using Optuna
+        
+        Parameters:
+        -----------
+        top_n : int
+            Number of top models to tune
+        n_trials : int
+            Number of trials for each model
         """
-        search_spaces = {
-            'Random Forest': {
-                'n_estimators': Integer(100, 500),
-                'max_depth': Integer(5, 30),
-                'min_samples_split': Integer(2, 20),
-                'min_samples_leaf': Integer(1, 10),
-                'max_features': Categorical(['sqrt', 'log2'])
-            },
-            'XGBoost': {
-                'n_estimators': Integer(100, 500),
-                'max_depth': Integer(3, 12),
-                'learning_rate': Real(0.01, 0.3, prior='log-uniform'),
-                'subsample': Real(0.6, 1.0),
-                'colsample_bytree': Real(0.6, 1.0)
-            },
-            'LightGBM': {
-                'n_estimators': Integer(100, 500),
-                'max_depth': Integer(3, 12),
-                'learning_rate': Real(0.01, 0.3, prior='log-uniform'),
-                'num_leaves': Integer(20, 100),
-                'subsample': Real(0.6, 1.0)
-            },
-            'Gradient Boosting': {
-                'n_estimators': Integer(100, 500),
-                'max_depth': Integer(3, 10),
-                'learning_rate': Real(0.01, 0.3, prior='log-uniform'),
-                'subsample': Real(0.6, 1.0)
-            },
-            'Ridge': {
-                'alpha': Real(0.1, 100.0, prior='log-uniform')
-            },
-            'Lasso': {
-                'alpha': Real(0.001, 1.0, prior='log-uniform')
-            },
-            'ANN': {
-                'neurons': Integer(32, 256),
-                'layers': Integer(2, 5),
-                'dropout_rate': Real(0.1, 0.5),
-                'learning_rate': Real(0.0001, 0.01, prior='log-uniform'),
-                'l2_reg': Real(0.0001, 0.1, prior='log-uniform'),
-                'batch_size': Integer(16, 128)
-            }
-        }
-        return search_spaces
-
-    def hyperparameter_tuning(self, top_n=5):
-        """
-        Perform hyperparameter tuning using Bayesian optimization
-        """
-        print(f"Performing hyperparameter tuning for top {top_n} models...")
+        print(f"Performing hyperparameter tuning for top {top_n} models using Optuna...")
         
         # Sort models by test RMSE
         sorted_models = sorted(self.results.items(), key=lambda x: x[1]['Test_RMSE'])
         top_models = [name for name, _ in sorted_models[:top_n]]
         
-        search_spaces = self.get_bayesian_search_spaces()
         tuned_results = {}
         
-        # Use KFold for regression tasks instead of StratifiedKFold
-        from sklearn.model_selection import KFold
-        cv = KFold(n_splits=5, shuffle=True, random_state=self.random_state)
-        
         for model_name in top_models:
-            if model_name in search_spaces:
-                print(f"Tuning {model_name}...")
+            print(f"\nTuning {model_name}...")
+            
+            try:
+                # Create study
+                study = optuna.create_study(direction='minimize')
                 
+                # Create objective function
+                objective = create_optuna_objective(model_name, self.X_train, self.y_train)
+                
+                # Optimize
+                study.optimize(objective, n_trials=n_trials)
+                
+                # Get best parameters
+                best_params = study.best_params
+                print(f"Best parameters for {model_name}:")
+                for param, value in best_params.items():
+                    print(f"  {param}: {value}")
+                
+                # Create and train model with best parameters
+                if model_name == 'Random Forest':
+                    best_model = RandomForestRegressor(**best_params, random_state=42, n_jobs=-1)
+                elif model_name == 'XGBoost':
+                    best_model = XGBRegressor(**best_params, random_state=42)
+                elif model_name == 'LightGBM':
+                    best_model = LGBMRegressor(**best_params, random_state=42, verbose=-1)
+                elif model_name == 'Gradient Boosting':
+                    best_model = GradientBoostingRegressor(**best_params, random_state=42)
+                elif model_name == 'Ridge':
+                    best_model = Ridge(**best_params, random_state=42)
+                elif model_name == 'Lasso':
+                    best_model = Lasso(**best_params, random_state=42)
+                elif model_name == 'ANN':
+                    best_model = ANNRegressor(**best_params, verbose=0)
+                
+                # Fit the model
+                best_model.fit(self.X_train, self.y_train)
+                
+                # Get predictions
+                y_pred_train_transformed = best_model.predict(self.X_train)
+                y_pred_test_transformed = best_model.predict(self.X_test)
+                
+                # Transform predictions back to original scale
+                y_pred_train_original = self.inverse_transform_predictions(y_pred_train_transformed)
+                y_pred_test_original = self.inverse_transform_predictions(y_pred_test_transformed)
+                
+                # Calculate metrics
+                train_rmse = np.sqrt(mean_squared_error(self.y_train_original, y_pred_train_original))
+                test_rmse = np.sqrt(mean_squared_error(self.y_test_original, y_pred_test_original))
+                train_r2 = r2_score(self.y_train_original, y_pred_train_original)
+                test_r2 = r2_score(self.y_test_original, y_pred_test_original)
+                train_custom_score = self.custom_score_function(self.y_train_original, y_pred_train_original)
+                test_custom_score = self.custom_score_function(self.y_test_original, y_pred_test_original)
+                
+                tuned_results[f'{model_name}_Tuned'] = {
+                    'Best_Params': best_params,
+                    'CV_RMSE_transformed': study.best_value,
+                    'Train_RMSE': train_rmse,
+                    'Test_RMSE': test_rmse,
+                    'Train_R2': train_r2,
+                    'Test_R2': test_r2,
+                    'Train_Custom_Score': train_custom_score,
+                    'Test_Custom_Score': test_custom_score,
+                    'Model': best_model,
+                    'Study': study  # Store the study for later analysis
+                }
+                
+                print(f"  ✓ {model_name} tuning completed - Test Custom Score: {test_custom_score:.4f}")
+                
+                # Plot optimization history and parameter importance
                 try:
-                    base_model = self.models[model_name]
-                    search_space = search_spaces[model_name]
-                    
-                    # Use Bayesian optimization with RMSE scoring
-                    bayes_search = BayesSearchCV(
-                        base_model,
-                        search_space,
-                        n_iter=50,  # Number of iterations for Bayesian optimization
-                        cv=cv,
-                        scoring='neg_root_mean_squared_error',  # Changed to RMSE scoring
-                        n_jobs=-1,
-                        random_state=self.random_state,
-                        verbose=0
-                    )
-                    
-                    # Fit the model
-                    bayes_search.fit(self.X_train, self.y_train)
-                    
-                    # Evaluate best model
-                    best_model = bayes_search.best_estimator_
-                    
-                    # Get predictions
-                    y_pred_train_transformed = best_model.predict(self.X_train)
-                    y_pred_test_transformed = best_model.predict(self.X_test)
-                    
-                    # Transform predictions back to original scale
-                    y_pred_train_original = self.inverse_transform_predictions(y_pred_train_transformed)
-                    y_pred_test_original = self.inverse_transform_predictions(y_pred_test_transformed)
-                    
-                    # Calculate metrics
-                    train_rmse = np.sqrt(mean_squared_error(self.y_train_original, y_pred_train_original))
-                    test_rmse = np.sqrt(mean_squared_error(self.y_test_original, y_pred_test_original))
-                    train_r2 = r2_score(self.y_train_original, y_pred_train_original)
-                    test_r2 = r2_score(self.y_test_original, y_pred_test_original)
-                    train_custom_score = self.custom_score_function(self.y_train_original, y_pred_train_original)
-                    test_custom_score = self.custom_score_function(self.y_test_original, y_pred_test_original)
-                    
-                    tuned_results[f'{model_name}_Tuned'] = {
-                        'Best_Params': bayes_search.best_params_,
-                        'CV_RMSE_transformed': -bayes_search.best_score_,  # Already in RMSE form
-                        'Train_RMSE': train_rmse,
-                        'Test_RMSE': test_rmse,
-                        'Train_R2': train_r2,
-                        'Test_R2': test_r2,
-                        'Train_Custom_Score': train_custom_score,
-                        'Test_Custom_Score': test_custom_score,
-                        'Model': best_model
-                    }
-                    
-                    print(f"  ✓ {model_name} tuning completed - Test Custom Score: {test_custom_score:.4f}")
-                    
+                    fig1 = plot_optimization_history(study)
+                    fig2 = plot_param_importances(study)
+                    fig1.write_html(f"optuna_plots/{model_name}_optimization_history.html")
+                    fig2.write_html(f"optuna_plots/{model_name}_param_importance.html")
                 except Exception as e:
-                    print(f"  ✗ Error tuning {model_name}: {str(e)}")
-                    continue
+                    print(f"  Warning: Could not create Optuna plots: {str(e)}")
+                
+            except Exception as e:
+                print(f"  ✗ Error tuning {model_name}: {str(e)}")
+                continue
         
         self.tuned_results = tuned_results
         return tuned_results
@@ -841,28 +919,28 @@ if __name__ == "__main__":
 
     # Define features to drop
 
-    # features_to_drop = [
-    #     # 'soiling_loss',
-    #     'temp_difference', 
-    #     'installation_type_tracking',
-    #     'pressure',
-    #     'wind_cooling_effect',
-    #     'id', 'voltage','current', 'wind_speed',
-    #     'panel_age', 'cloud_coverage', 
-    #     'soiling_ratio', 'maintenance_count', 'humidity', 'expected_irradiance_clean'
-    # ]
-
     features_to_drop = [
-        'id', 'temperature', 'voltage',
-        'module_temperature', 'pressure', 'error_code',
-        'temp_coefficient_effect', 'age_category',
-        'effective_module_temp', 'power_output_log',
-        'temp_difference_robust', 'performance_deviation', 'efficiency_ratio',
-        'mean', 'std', 'min', 'max', 'power_output_string_mean',
-        'power_output_string_std', 'power_output_string_min',
-        'power_output_string_max', 'error_indicator','operating_regime',
-        'regime_expected_power', 'regime_performance_deviation'
+        # 'soiling_loss',
+        'temp_difference', 
+        'installation_type_tracking',
+        'pressure',
+        'wind_cooling_effect',
+        'id', 'voltage','current', 'wind_speed',
+        'panel_age', 'cloud_coverage', 
+        'soiling_ratio', 'maintenance_count', 'humidity', 'expected_irradiance_clean'
     ]
+
+    # features_to_drop = [
+    #     'id', 'temperature', 'voltage',
+    #     'module_temperature', 'pressure', 'error_code',
+    #     'temp_coefficient_effect', 'age_category',
+    #     'effective_module_temp', 'power_output_log',
+    #     'temp_difference_robust', 'performance_deviation', 'efficiency_ratio',
+    #     'mean', 'std', 'min', 'max', 'power_output_string_mean',
+    #     'power_output_string_std', 'power_output_string_min',
+    #     'power_output_string_max', 'error_indicator','operating_regime',
+    #     'regime_expected_power', 'regime_performance_deviation'
+    # ]
 
     # Initialize the model selector
     # Note: Use raw data path here, not pre-engineered data

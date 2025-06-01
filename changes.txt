@@ -1,0 +1,6 @@
+70, 30 train test split (89.79)
+including temperatures in the data pipeline (89.79)
+RF imputation of installation_type (89.82610)
+
+
+OHE and consistency in the pipeline (89.8)
