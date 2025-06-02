@@ -917,30 +917,44 @@ class SolarPanelModelSelector:
 # Usage example
 if __name__ == "__main__":
 
-    # Define features to drop
+        # Define features to drop
 
     features_to_drop = [
-        # 'soiling_loss',
-        'temp_difference', 
-        'installation_type_tracking',
-        'pressure',
-        'wind_cooling_effect',
-        'id', 'voltage','current', 'wind_speed',
-        'panel_age', 'cloud_coverage', 
-        'soiling_ratio', 'maintenance_count', 'humidity', 'expected_irradiance_clean'
+        'id',                           # Identifier column
+        'temperature',                  # Environmental feature
+        'irradiance',                   # Raw irradiance (you have normalized version)
+        # 'humidity',                     # Environmental feature
+        'maintenance_count',            # Maintenance related (you have frequency)
+        'voltage',                      # Electrical parameter
+        # 'module_temperature',           # Temperature measurement
+        # 'cloud_coverage',               # Weather feature
+        'wind_speed',                   # Weather feature
+        'pressure',                     # Environmental feature
+        'string_id',                    # Categorical identifier
+        'error_code',                   # Categorical feature
+        # 'installation_type',            # Categorical feature
+        # 'temp_difference',              # Temperature derived feature
+        'temp_coefficient_effect',      # Temperature related
+        'soiling_loss',                 # Soiling related (you have ratio)
+        # 'age_category',                 # Categorical age (you have numerical age)
+        # 'environmental_stress',         # Composite environmental feature
+        'wind_cooling_effect',          # Wind related feature
+        # 'effective_module_temp'         # Temperature derived feature
     ]
 
-    # features_to_drop = [
-    #     'id', 'temperature', 'voltage',
-    #     'module_temperature', 'pressure', 'error_code',
-    #     'temp_coefficient_effect', 'age_category',
-    #     'effective_module_temp', 'power_output_log',
-    #     'temp_difference_robust', 'performance_deviation', 'efficiency_ratio',
-    #     'mean', 'std', 'min', 'max', 'power_output_string_mean',
-    #     'power_output_string_std', 'power_output_string_min',
-    #     'power_output_string_max', 'error_indicator','operating_regime',
-    #     'regime_expected_power', 'regime_performance_deviation'
-    # ]
+    # Selected features to KEEP (plus target 'efficiency')
+    selected_features = [
+        'irradiance_normalized',        # Key: Normalized solar irradiance
+        'soiling_ratio',               # Key: Panel cleanliness factor
+        'panel_age',                   # Key: Age of solar panel
+        'expected_irradiance_clean',   # Key: Expected clean irradiance
+        'age_degradation_factor',      # Key: Age-related degradation
+        'current',                     # Key: Electrical current output
+        'maintenance_frequency',       # Key: Maintenance frequency
+        'irradiance_cloud_ratio',      # Key: Cloud impact on irradiance
+        'power_output',               # Key: Power generation
+        'efficiency'                  # Target variable
+    ]
 
     # Initialize the model selector
     # Note: Use raw data path here, not pre-engineered data

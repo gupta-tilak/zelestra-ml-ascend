@@ -9,15 +9,22 @@ from sklearn.preprocessing import LabelEncoder
 class ImputationPipeline:
     
     def __init__(self):
+        # Model-based imputers (trained at the end)
         self.temp_from_module_model = None
         self.module_from_temp_model = None
+        self.installation_type_classifier = None
+        self.installation_type_features = None
+        self.installation_type_encoder = None
+        
+        # Standard imputers (applied first)
         self.mice_imputer = None
         self.knn_imputer = None
+        
+        # Simple fills (applied in middle)
         self.error_code_fill = None
-        self.installation_type_classifier = None  # Changed from fill to classifier
-        self.installation_type_features = None    # Store features used for prediction
-        self.installation_type_encoder = None     # For encoding categorical features
         self.cloud_coverage_median = None
+        
+        # Column definitions
         self.mice_cols = ['irradiance', 'voltage', 'current', 'panel_age', 'cloud_coverage', 'maintenance_count','soiling_ratio']
         self.knn_cols = ['wind_speed', 'pressure', 'temperature', 'module_temperature', 'humidity']
         
@@ -39,11 +46,12 @@ class ImputationPipeline:
             print(f"Dropping {len(bad_temp)} rows with temperature > 70")
             drop_indices.update(bad_temp.index)
 
-        # Rule 2: Drop irradiance < 0
+        # Rule 2: Convert negative irradiance to absolute values
         if 'irradiance' in df_cleaned.columns:
-            bad_irr = df_cleaned[df_cleaned['irradiance'] < 0]
-            print(f"Dropping {len(bad_irr)} rows with irradiance < 0")
-            drop_indices.update(bad_irr.index)
+            negative_irr = df_cleaned[df_cleaned['irradiance'] < 0]
+            if len(negative_irr) > 0:
+                print(f"Converting {len(negative_irr)} negative irradiance values to absolute values")
+                df_cleaned.loc[df_cleaned['irradiance'] < 0, 'irradiance'] = df_cleaned.loc[df_cleaned['irradiance'] < 0, 'irradiance'].abs()
 
         # Rule 3: Impute cloud_coverage > 100 (for training, we still impute)
         if 'cloud_coverage' in df_cleaned.columns:
@@ -127,29 +135,51 @@ class ImputationPipeline:
         
         return feature_df, available_cols
 
-    def fit(self, df, is_training=True):
-        """
-        Fit the imputation pipeline
+    def _fit_standard_imputers(self, df):
+        """Fit standard imputers (MICE, KNN) - STAGE 1"""
+        print("Stage 1: Fitting standard imputers (MICE, KNN)...")
         
-        Parameters:
-        df: DataFrame to fit on
-        is_training: Boolean flag to indicate if this is training data (applies cleaning rules)
-        """
-        df = df.copy()
-        
-        # Apply appropriate cleaning rules
-        if is_training:
-            df = self._apply_training_cleaning_rules(df)
-        else:
-            # For prediction data during fit (shouldn't happen normally)
-            df = self._apply_prediction_cleaning_rules(df)
+        # MICE imputer - only fit on columns that exist
+        available_mice_cols = [col for col in self.mice_cols if col in df.columns]
+        if available_mice_cols:
+            self.mice_imputer = IterativeImputer(random_state=42, max_iter=10, sample_posterior=False)
+            self.mice_imputer.fit(df[available_mice_cols])
+            print(f"  - MICE imputer fitted on: {available_mice_cols}")
 
+        # KNN imputer - only fit on columns that exist
+        available_knn_cols = [col for col in self.knn_cols if col in df.columns]
+        if available_knn_cols:
+            self.knn_imputer = KNNImputer(n_neighbors=5, weights='uniform')
+            self.knn_imputer.fit(df[available_knn_cols])
+            print(f"  - KNN imputer fitted on: {available_knn_cols}")
+
+    def _fit_simple_fills(self, df):
+        """Prepare simple fill values - STAGE 2"""
+        print("Stage 2: Preparing simple fill values...")
+        
+        # Categorical fills
+        if 'error_code' in df.columns:
+            self.error_code_fill = 'NO_ERROR'
+            print(f"  - Error code fill value: {self.error_code_fill}")
+
+        # Store cloud coverage median if not already stored and we have valid data
+        if self.cloud_coverage_median is None and 'cloud_coverage' in df.columns:
+            valid_cloud_mask = (df['cloud_coverage'] <= 100) & (df['cloud_coverage'].notna())
+            if valid_cloud_mask.any():
+                self.cloud_coverage_median = df.loc[valid_cloud_mask, 'cloud_coverage'].median()
+                print(f"  - Cloud coverage median: {self.cloud_coverage_median}")
+
+    def _fit_model_based_imputers(self, df):
+        """Fit model-based imputers - STAGE 3 (FINAL)"""
+        print("Stage 3: Fitting model-based imputers...")
+        
         # Regression imputation: temperature from module_temperature
         temp_mask = df['temperature'].notna() & df['module_temperature'].notna()
         if temp_mask.any():
             self.temp_from_module_model = LinearRegression().fit(
                 df.loc[temp_mask, ['module_temperature']], df.loc[temp_mask, 'temperature']
             )
+            print(f"  - Temperature regression model fitted on {temp_mask.sum()} samples")
 
         # Regression imputation: module_temperature from temperature
         module_mask = df['temperature'].notna() & df['module_temperature'].notna()
@@ -157,22 +187,7 @@ class ImputationPipeline:
             self.module_from_temp_model = LinearRegression().fit(
                 df.loc[module_mask, ['temperature']], df.loc[module_mask, 'module_temperature']
             )
-
-        # MICE imputer - only fit on columns that exist
-        available_mice_cols = [col for col in self.mice_cols if col in df.columns]
-        if available_mice_cols:
-            self.mice_imputer = IterativeImputer(random_state=42, max_iter=10, sample_posterior=False)
-            self.mice_imputer.fit(df[available_mice_cols])
-
-        # KNN imputer - only fit on columns that exist
-        available_knn_cols = [col for col in self.knn_cols if col in df.columns]
-        if available_knn_cols:
-            self.knn_imputer = KNNImputer(n_neighbors=5, weights='uniform')
-            self.knn_imputer.fit(df[available_knn_cols])
-
-        # Categorical fills
-        if 'error_code' in df.columns:
-            self.error_code_fill = 'NO_ERROR'
+            print(f"  - Module temperature regression model fitted on {module_mask.sum()} samples")
 
         # Fit installation_type classifier
         if 'installation_type' in df.columns:
@@ -201,52 +216,20 @@ class ImputationPipeline:
                     )
                     self.installation_type_classifier.fit(X_train, y_train)
                     
-                    print(f"Trained installation_type classifier using features: {available_cols}")
-                    print(f"Training accuracy: {self.installation_type_classifier.score(X_train, y_train):.3f}")
+                    print(f"  - Installation type classifier fitted using features: {available_cols}")
+                    print(f"  - Training accuracy: {self.installation_type_classifier.score(X_train, y_train):.3f}")
                 else:
-                    print("Warning: No suitable features found for installation_type prediction. Will use mode fallback.")
+                    print("  - Warning: No suitable features found for installation_type prediction. Will use mode fallback.")
                     # Fallback to mode
                     self.installation_type_fill = df['installation_type'].mode()[0] if len(df['installation_type'].mode()) > 0 else 'UNKNOWN'
             else:
-                print("Warning: No non-null installation_type values found for training classifier.")
+                print("  - Warning: No non-null installation_type values found for training classifier.")
                 self.installation_type_fill = 'UNKNOWN'
 
-        # Store cloud coverage median if not already stored and we have valid data
-        if self.cloud_coverage_median is None and 'cloud_coverage' in df.columns:
-            valid_cloud_mask = (df['cloud_coverage'] <= 100) & (df['cloud_coverage'].notna())
-            if valid_cloud_mask.any():
-                self.cloud_coverage_median = df.loc[valid_cloud_mask, 'cloud_coverage'].median()
-
-        return self
-
-    def transform(self, df, is_training=False):
-        """
-        Transform the data using fitted imputers
+    def _apply_standard_imputers(self, df):
+        """Apply standard imputers (MICE, KNN) - STAGE 1"""
+        print("Stage 1: Applying standard imputers...")
         
-        Parameters:
-        df: DataFrame to transform
-        is_training: Boolean flag to indicate if this is training data
-        """
-        df = df.copy()
-
-        # Apply appropriate cleaning rules
-        if is_training:
-            df = self._apply_training_cleaning_rules(df)
-        else:
-            df = self._apply_prediction_cleaning_rules(df)
-
-        # Regression imputation: temperature from module_temperature
-        if self.temp_from_module_model is not None:
-            mask = df['temperature'].isna() & df['module_temperature'].notna()
-            if mask.any():
-                df.loc[mask, 'temperature'] = self.temp_from_module_model.predict(df.loc[mask, ['module_temperature']])
-
-        # Regression imputation: module_temperature from temperature
-        if self.module_from_temp_model is not None:
-            mask = df['module_temperature'].isna() & df['temperature'].notna()
-            if mask.any():
-                df.loc[mask, 'module_temperature'] = self.module_from_temp_model.predict(df.loc[mask, ['temperature']])
-
         # MICE imputation
         if self.mice_imputer is not None:
             available_mice_cols = [col for col in self.mice_cols if col in df.columns]
@@ -254,6 +237,7 @@ class ImputationPipeline:
                 mice_data = df[available_mice_cols]
                 mice_imputed = self.mice_imputer.transform(mice_data)
                 df[available_mice_cols] = pd.DataFrame(mice_imputed, columns=available_mice_cols, index=df.index)
+                print(f"  - MICE imputation applied to: {available_mice_cols}")
 
         # KNN imputation
         if self.knn_imputer is not None:
@@ -262,10 +246,40 @@ class ImputationPipeline:
                 knn_data = df[available_knn_cols]
                 knn_imputed = self.knn_imputer.transform(knn_data)
                 df[available_knn_cols] = pd.DataFrame(knn_imputed, columns=available_knn_cols, index=df.index)
+                print(f"  - KNN imputation applied to: {available_knn_cols}")
 
+        return df
+
+    def _apply_simple_fills(self, df):
+        """Apply simple fills - STAGE 2"""
+        print("Stage 2: Applying simple fills...")
+        
         # Categorical fills
         if 'error_code' in df.columns and self.error_code_fill is not None:
+            missing_count = df['error_code'].isna().sum()
             df['error_code'] = df['error_code'].fillna(self.error_code_fill)
+            if missing_count > 0:
+                print(f"  - Filled {missing_count} missing error_code values")
+
+        return df
+
+    def _apply_model_based_imputers(self, df):
+        """Apply model-based imputers - STAGE 3 (FINAL)"""
+        print("Stage 3: Applying model-based imputers...")
+        
+        # Regression imputation: temperature from module_temperature
+        if self.temp_from_module_model is not None:
+            mask = df['temperature'].isna() & df['module_temperature'].notna()
+            if mask.any():
+                df.loc[mask, 'temperature'] = self.temp_from_module_model.predict(df.loc[mask, ['module_temperature']])
+                print(f"  - Predicted {mask.sum()} temperature values from module_temperature")
+
+        # Regression imputation: module_temperature from temperature
+        if self.module_from_temp_model is not None:
+            mask = df['module_temperature'].isna() & df['temperature'].notna()
+            if mask.any():
+                df.loc[mask, 'module_temperature'] = self.module_from_temp_model.predict(df.loc[mask, ['temperature']])
+                print(f"  - Predicted {mask.sum()} module_temperature values from temperature")
 
         # Predictive imputation for installation_type
         if 'installation_type' in df.columns:
@@ -283,17 +297,82 @@ class ImputationPipeline:
                     predicted_values = self.installation_type_classifier.predict(X_missing)
                     df.loc[missing_mask, 'installation_type'] = predicted_values
                     
-                    print(f"Predicted {missing_mask.sum()} missing installation_type values using classifier")
+                    print(f"  - Predicted {missing_mask.sum()} missing installation_type values using classifier")
                 else:
-                    print("Warning: Could not prepare features for installation_type prediction")
+                    print("  - Warning: Could not prepare features for installation_type prediction")
                     # Fallback to mode if available
                     if hasattr(self, 'installation_type_fill') and self.installation_type_fill is not None:
                         df['installation_type'] = df['installation_type'].fillna(self.installation_type_fill)
             elif missing_mask.any() and hasattr(self, 'installation_type_fill') and self.installation_type_fill is not None:
                 # Fallback to mode imputation
                 df['installation_type'] = df['installation_type'].fillna(self.installation_type_fill)
-                print(f"Used mode fallback for {missing_mask.sum()} missing installation_type values")
+                print(f"  - Used mode fallback for {missing_mask.sum()} missing installation_type values")
 
+        return df
+
+    def fit(self, df, is_training=True):
+        """
+        Fit the imputation pipeline in stages
+        
+        Parameters:
+        df: DataFrame to fit on
+        is_training: Boolean flag to indicate if this is training data (applies cleaning rules)
+        """
+        print("=== FITTING IMPUTATION PIPELINE ===")
+        df = df.copy()
+        
+        # Apply appropriate cleaning rules
+        if is_training:
+            df = self._apply_training_cleaning_rules(df)
+        else:
+            # For prediction data during fit (shouldn't happen normally)
+            df = self._apply_prediction_cleaning_rules(df)
+
+        # STAGE 1: Fit standard imputers (MICE, KNN) first
+        self._fit_standard_imputers(df)
+        
+        # Apply standard imputers to get complete data for model-based imputers
+        df_stage1 = self._apply_standard_imputers(df.copy())
+        
+        # STAGE 2: Prepare simple fills
+        self._fit_simple_fills(df_stage1)
+        
+        # Apply simple fills
+        df_stage2 = self._apply_simple_fills(df_stage1.copy())
+        
+        # STAGE 3: Fit model-based imputers on data with most missing values filled
+        self._fit_model_based_imputers(df_stage2)
+        
+        print("=== PIPELINE FITTING COMPLETE ===")
+        return self
+
+    def transform(self, df, is_training=False):
+        """
+        Transform the data using fitted imputers in stages
+        
+        Parameters:
+        df: DataFrame to transform
+        is_training: Boolean flag to indicate if this is training data
+        """
+        print("=== TRANSFORMING DATA ===")
+        df = df.copy()
+
+        # Apply appropriate cleaning rules
+        if is_training:
+            df = self._apply_training_cleaning_rules(df)
+        else:
+            df = self._apply_prediction_cleaning_rules(df)
+
+        # STAGE 1: Apply standard imputers first (MICE, KNN)
+        df = self._apply_standard_imputers(df)
+
+        # STAGE 2: Apply simple fills
+        df = self._apply_simple_fills(df)
+
+        # STAGE 3: Apply model-based imputers last
+        df = self._apply_model_based_imputers(df)
+        
+        print("=== TRANSFORMATION COMPLETE ===")
         return df
 
     def fit_transform(self, df, is_training=True):
