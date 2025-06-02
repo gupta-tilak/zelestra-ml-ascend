@@ -30,6 +30,7 @@ from skopt import BayesSearchCV
 from skopt.space import Real, Integer, Categorical
 
 from utils.imputation import ImputationPipeline
+from utils.data_augmentation import DataAugmentationPipeline
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -503,11 +504,38 @@ class SolarPanelModelSelector:
         self.X_test = pd.DataFrame(X_test_processed, columns=feature_names)
         self.y_train, self.y_test = y_train, y_test
         
+        # Apply data augmentation to training data
+        print("\nApplying data augmentation to training data...")
+        augmentation_pipeline = DataAugmentationPipeline(random_state=self.random_state)
+        
+        # Store original training data before augmentation
+        X_train_orig = self.X_train.copy()
+        y_train_orig = self.y_train.copy()
+        
+        # Apply augmentation
+        X_train_aug, y_train_aug = augmentation_pipeline.fit_transform(
+            self.X_train.values, 
+            self.y_train,
+            apply_smote=True,
+            apply_noise=True,
+            apply_dropout=True
+        )
+        
+        # Update training data with augmented samples
+        self.X_train = pd.DataFrame(X_train_aug, columns=feature_names)
+        self.y_train = y_train_aug
+        
+        # Also update the original target values for the augmented samples
+        # We need to transform the augmented target values back to original scale
+        y_train_aug_reshaped = y_train_aug.reshape(-1, 1)
+        y_train_orig_aug = self.target_transformer.inverse_transform(y_train_aug_reshaped).flatten()
+        self.y_train_original = y_train_orig_aug
+        
         # Store feature names and preprocessor
         self.final_feature_names = list(feature_names)
         self.preprocessor = self.preprocessor_with_onehot
         
-        print(f"Training set shape: {self.X_train.shape}")
+        print(f"Training set shape after augmentation: {self.X_train.shape}")
         print(f"Test set shape: {self.X_test.shape}")
         print(f"Number of features after one-hot encoding: {len(self.final_feature_names)}")
         if self.categorical_cols:
