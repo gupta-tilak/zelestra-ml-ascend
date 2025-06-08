@@ -195,7 +195,14 @@ class NoiseInjection:
         X_augmented, y_augmented : augmented data
         """
         X = np.array(X)
+        y = np.array(y).flatten() if y is not None else None
+        
+        if y is not None and len(X) != len(y):
+            raise ValueError(f"Input shapes don't match: X {X.shape}, y {y.shape}")
+        
         n_samples = int(len(X) * augmentation_factor)
+        if n_samples == 0:
+            return np.array([]), np.array([])
         
         np.random.seed(self.random_state)
         
@@ -211,7 +218,6 @@ class NoiseInjection:
         X_noisy = X_selected + noise
         
         if y is not None:
-            y = np.array(y)
             y_selected = y[indices]
             return X_noisy, y_selected
         
@@ -237,7 +243,14 @@ class NoiseInjection:
         X_augmented, y_augmented : augmented data
         """
         X = np.array(X)
+        y = np.array(y).flatten() if y is not None else None
+        
+        if y is not None and len(X) != len(y):
+            raise ValueError(f"Input shapes don't match: X {X.shape}, y {y.shape}")
+        
         n_samples = int(len(X) * augmentation_factor)
+        if n_samples == 0:
+            return np.array([]), np.array([])
         
         np.random.seed(self.random_state + 1)
         
@@ -246,7 +259,7 @@ class NoiseInjection:
         X_selected = X[indices].copy()
         
         # Apply feature dropout
-        n_features_to_drop = int(X.shape[1] * dropout_rate)
+        n_features_to_drop = max(1, int(X.shape[1] * dropout_rate))
         
         for i in range(len(X_selected)):
             features_to_drop = np.random.choice(
@@ -255,7 +268,6 @@ class NoiseInjection:
             X_selected[i, features_to_drop] = 0  # or use feature mean
         
         if y is not None:
-            y = np.array(y)
             y_selected = y[indices]
             return X_selected, y_selected
         
@@ -298,8 +310,16 @@ class DataAugmentationPipeline:
         """
         print("Applying data augmentation pipeline...")
         
-        X_augmented = [np.array(X)]
-        y_augmented = [np.array(y)]
+        # Convert inputs to numpy arrays and ensure correct shapes
+        X = np.array(X)
+        y = np.array(y).flatten()  # Ensure y is 1D
+        
+        if len(X) != len(y):
+            raise ValueError(f"Input shapes don't match: X {X.shape}, y {y.shape}")
+        
+        # Store original data
+        X_augmented = [X]
+        y_augmented = [y]
         
         original_size = len(X)
         
@@ -323,9 +343,10 @@ class DataAugmentationPipeline:
             X_noise, y_noise = self.noise_injector.add_gaussian_noise(
                 X, y, augmentation_factor=0.3
             )
-            X_augmented.append(X_noise)
-            y_augmented.append(y_noise)
-            print(f"  Added {len(X_noise)} noise-augmented samples")
+            if len(X_noise) > 0:  # Only add if we got samples
+                X_augmented.append(X_noise)
+                y_augmented.append(y_noise)
+                print(f"  Added {len(X_noise)} noise-augmented samples")
         
         # Apply feature dropout
         if apply_dropout:
@@ -333,13 +354,18 @@ class DataAugmentationPipeline:
             X_dropout, y_dropout = self.noise_injector.add_feature_dropout(
                 X, y, dropout_rate=0.15, augmentation_factor=0.2
             )
-            X_augmented.append(X_dropout)
-            y_augmented.append(y_dropout)
-            print(f"  Added {len(X_dropout)} dropout-augmented samples")
+            if len(X_dropout) > 0:  # Only add if we got samples
+                X_augmented.append(X_dropout)
+                y_augmented.append(y_dropout)
+                print(f"  Added {len(X_dropout)} dropout-augmented samples")
         
         # Combine all augmented data
         X_final = np.vstack(X_augmented)
         y_final = np.concatenate(y_augmented)
+        
+        # Verify shapes match
+        if len(X_final) != len(y_final):
+            raise ValueError(f"Shape mismatch after augmentation: X_final {X_final.shape}, y_final {y_final.shape}")
         
         # Shuffle the augmented dataset
         np.random.seed(self.random_state)
