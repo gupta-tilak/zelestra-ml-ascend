@@ -1,7 +1,8 @@
+import warnings
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, RandomizedSearchCV
-from sklearn.preprocessing import StandardScaler, RobustScaler, PowerTransformer, LabelEncoder
+from sklearn.preprocessing import StandardScaler, RobustScaler, PowerTransformer, LabelEncoder, OneHotEncoder, KBinsDiscretizer
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
@@ -24,7 +25,7 @@ from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.regularizers import l1_l2
 
 from utils.imputation import ImputationPipeline
-import warnings
+from utils.data_augmentation import DataAugmentationPipeline 
 warnings.filterwarnings('ignore')
 
 # Set random seeds for reproducibility
@@ -35,6 +36,8 @@ class ANNRegressor(BaseEstimator, RegressorMixin):
     """
     Custom ANN Regressor wrapper that mimics scikit-learn interface
     """
+    _estimator_type = "regressor"  # <-- Add this line
+    
     def __init__(self, neurons=128, layers=3, dropout_rate=0.3, 
                  learning_rate=0.001, l1_reg=0.0, l2_reg=0.01,
                  epochs=200, batch_size=32, validation_split=0.2,
@@ -165,6 +168,7 @@ class SolarPanelModelSelector:
         self.preprocessor = None
         self.imputer = None
         self.features_to_drop = features_to_drop or []
+        self.final_feature_names = None  # For one-hot encoded features
         
         # Stacking-specific attributes
         self.stacking_results = {}
@@ -308,22 +312,14 @@ class SolarPanelModelSelector:
         """
         print("Creating preprocessing pipeline...")
         
-        # For neural networks, we need StandardScaler instead of RobustScaler
-        # as neural networks work better with standardized inputs
-        numerical_pipeline = Pipeline([
-            ('scaler', StandardScaler())  # Neural networks prefer StandardScaler
-        ])
-        
-        # Categorical preprocessing pipeline
-        categorical_pipeline = Pipeline([
-            ('encoder', 'passthrough')  # Will be handled separately
-        ])
-        
-        # Create preprocessor
-        self.preprocessor = ColumnTransformer([
-            ('num', numerical_pipeline, self.numerical_cols),
-            ('cat', categorical_pipeline, self.categorical_cols)
-        ])
+        transformers = []
+        if self.numerical_cols:
+            numerical_transformer = StandardScaler()
+            transformers.append(('num', numerical_transformer, self.numerical_cols))
+        if self.categorical_cols:
+            categorical_transformer = OneHotEncoder(drop='first', sparse_output=False, handle_unknown='ignore')
+            transformers.append(('cat', categorical_transformer, self.categorical_cols))
+        self.preprocessor = ColumnTransformer(transformers=transformers, remainder='drop')
         
         return self.preprocessor
     
@@ -343,14 +339,19 @@ class SolarPanelModelSelector:
         self.target_transformer = PowerTransformer(method='yeo-johnson')
         y_transformed = self.target_transformer.fit_transform(y.values.reshape(-1, 1)).flatten()
         
+        # Binning the target variable for stratification
+        n_bins = 10
+        kbd = KBinsDiscretizer(n_bins=n_bins, encode='ordinal', strategy='quantile')
+        y_binned = kbd.fit_transform(y.values.reshape(-1, 1)).ravel()
+        
         # Train-test split
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y_transformed, test_size=self.test_size, random_state=self.random_state, stratify=None
+            X, y_transformed, test_size=self.test_size, random_state=self.random_state, stratify=y_binned
         )
         
         # Also split original target for evaluation
         _, _, self.y_train_original, self.y_test_original = train_test_split(
-            X, y, test_size=self.test_size, random_state=self.random_state, stratify=None
+            X, y, test_size=self.test_size, random_state=self.random_state, stratify=y_binned
         )
         
         # Handle categorical encoding
@@ -362,19 +363,62 @@ class SolarPanelModelSelector:
             self.label_encoders[col] = le
         
         # Apply numerical preprocessing
-        X_train_scaled = self.preprocessor.fit_transform(X_train)
-        X_test_scaled = self.preprocessor.transform(X_test)
+        X_train_processed = self.preprocessor.fit_transform(X_train)
+        X_test_processed = self.preprocessor.transform(X_test)
         
         # Convert back to DataFrame for easier handling
-        feature_names = self.numerical_cols + self.categorical_cols
-        X_train_scaled = pd.DataFrame(X_train_scaled, columns=feature_names)
-        X_test_scaled = pd.DataFrame(X_test_scaled, columns=feature_names)
+        feature_names = self.preprocessor.get_feature_names_out()
+        self.X_train = pd.DataFrame(X_train_processed, columns=feature_names)
+        self.X_test = pd.DataFrame(X_test_processed, columns=feature_names)
         
-        self.X_train, self.X_test = X_train_scaled, X_test_scaled
-        self.y_train, self.y_test = y_train, y_test
+        # Store transformed target values
+        self.y_train = y_train
+        self.y_test = y_test
         
-        print(f"Training set shape: {self.X_train.shape}")
+        # Store original training data before augmentation
+        self.X_train_original = self.X_train.copy()
+        self.y_train_original_transformed = y_train.copy()
+        
+        # Optional: Data augmentation
+        print("\nApplying data augmentation...")
+        augmentation_pipeline = DataAugmentationPipeline(random_state=self.random_state)
+        
+        # Convert to numpy arrays for augmentation
+        X_train_np = self.X_train.values
+        y_train_np = y_train
+        
+        # Apply augmentation
+        X_train_aug, y_train_aug = augmentation_pipeline.fit_transform(
+            X_train_np, 
+            y_train_np,
+            apply_smote=True,
+            apply_noise=True,
+            apply_dropout=True
+        )
+        
+        # Verify shapes match after augmentation
+        if len(X_train_aug) != len(y_train_aug):
+            raise ValueError(f"Data augmentation shape mismatch: X_train_aug {X_train_aug.shape}, y_train_aug {y_train_aug.shape}")
+        
+        # Update training data with augmented data
+        self.X_train = pd.DataFrame(X_train_aug, columns=feature_names)
+        self.y_train = y_train_aug
+        
+        # Also update the original target values for the augmented samples
+        # We need to transform the augmented target values back to original scale
+        y_train_aug_reshaped = y_train_aug.reshape(-1, 1)
+        y_train_orig_aug = self.target_transformer.inverse_transform(y_train_aug_reshaped).flatten()
+        self.y_train_original = y_train_orig_aug
+        
+        # Store feature names and preprocessor
+        self.final_feature_names = list(feature_names)
+        self.preprocessor = self.preprocessor
+        
+        print(f"Training set shape after augmentation: {self.X_train.shape}")
         print(f"Test set shape: {self.X_test.shape}")
+        print(f"Number of features after one-hot encoding: {len(self.final_feature_names)}")
+        if self.categorical_cols:
+            print(f"Categorical columns '{', '.join(self.categorical_cols)}' have been one-hot encoded")
         
         return self.X_train, self.X_test, self.y_train, self.y_test
     
@@ -398,7 +442,7 @@ class SolarPanelModelSelector:
             'CatBoost': CatBoostRegressor(random_state=self.random_state, verbose=False),
             'KNN': KNeighborsRegressor(),
             'SVR': SVR(),
-            # 'ANN': ANNRegressor(verbose=0)  # Use custom ANN wrapper
+            # 'ANN': ANNRegressor(verbose=0)
         }
         
         return self.models
@@ -835,7 +879,6 @@ class SolarPanelModelSelector:
             print(f"   Meta Regressor: {stacking_info['Meta_Regressor']}")
             print(f"   Base Estimators:")
             for estimator_info in stacking_info['Base_Estimators']:
-                status = "Tuned" if estimator_info['is_tuned'] else "Base"
                 print(f"     - {estimator_info['name']} ({status}): {estimator_info['score']:.4f}")
         
         # Store the best model
@@ -872,7 +915,9 @@ class SolarPanelModelSelector:
         # Add best model metrics if available
         if hasattr(self, 'best_model_name'):
             # Find the best model results
-            all_results = {**self.results}
+            all_results = {}
+            if hasattr(self, 'results'):
+                all_results.update(self.results)
             if hasattr(self, 'tuned_results'):
                 all_results.update(self.tuned_results)
             if hasattr(self, 'stacking_results'):
@@ -881,9 +926,9 @@ class SolarPanelModelSelector:
             if self.best_model_name in all_results:
                 best_results = all_results[self.best_model_name]
                 summary['best_model'].update({
-                    'test_custom_score': best_results['Test_Custom_Score'],
-                    'test_rmse': best_results['Test_RMSE'],
-                    'test_r2': best_results['Test_R2']
+                    'test_custom_score': best_results.get('Test_Custom_Score'),
+                    'test_rmse': best_results.get('Test_RMSE'),
+                    'test_r2': best_results.get('Test_R2')
                 })
         
         return summary
@@ -928,16 +973,16 @@ class SolarPanelModelSelector:
         print("\n📋 STEP 8: Pipeline Summary")
         summary = self.get_model_summary()
         
-        print("\n✅ PIPELINE COMPLETED SUCCESSFULLY!")
-        print(f"Best Model: {summary['best_model']['name']}")
-        print(f"Final Test Score: {summary['best_model']['test_custom_score']:.4f}")
+        # Step 9: Select best model explicitly
+        print("\n🎯 STEP 9: Selecting Best Model")
+        self.select_best_model()
         
-        return {
-            'comparison_df': comparison_df,
-            'summary': summary,
-            'best_model': self.best_model,
-            'best_model_name': self.best_model_name
-        }
+        print("\n✅ PIPELINE COMPLETED SUCCESSFULLY!")
+        print(f"Best Model: {self.best_model_name}")
+        print(f"Best Score: {self.best_score:.4f}")
+        
+        # Return the best model and its information
+        return self.best_model, self.best_model_name, self.best_score
     
     def select_best_model(self):
         """
@@ -1101,8 +1146,7 @@ class SolarPanelModelSelector:
         X_scaled = self.preprocessor.transform(X_processed)
         
         # Convert back to DataFrame
-        feature_names = self.numerical_cols + self.categorical_cols
-        X_scaled = pd.DataFrame(X_scaled, columns=feature_names)
+        X_scaled = pd.DataFrame(X_scaled, columns=self.final_feature_names)
         
         # Step 8: Make predictions (on transformed scale)
         predictions_transformed = self.best_model.predict(X_scaled)
@@ -1121,13 +1165,23 @@ class SolarPanelModelSelector:
         import pickle
         import os
         
+        # Check if required attributes are set
+        required_attrs = ['best_model', 'preprocessor', 'target_transformer', 'imputer',
+                         'feature_cols', 'categorical_cols', 'numerical_cols',
+                         'best_model_name', 'best_score', 'features_to_drop',
+                         'final_feature_names']
+        
+        missing_attrs = [attr for attr in required_attrs if not hasattr(self, attr)]
+        if missing_attrs:
+            raise ValueError(f"Missing required attributes: {', '.join(missing_attrs)}. "
+                           f"Please run the complete pipeline first.")
+        
         # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         
         model_package = {
             'model': self.best_model,
             'preprocessor': self.preprocessor,
-            'label_encoders': self.label_encoders,
             'target_transformer': self.target_transformer,
             'imputer': self.imputer,
             'feature_names': self.feature_cols,
@@ -1136,8 +1190,7 @@ class SolarPanelModelSelector:
             'best_model_name': self.best_model_name,
             'best_score': self.best_score,
             'features_to_drop': self.features_to_drop,
-            'best_results': self.best_results,
-            'target_col': self.target_col
+            'final_feature_names': self.final_feature_names
         }
         
         with open(filepath, 'wb') as f:
@@ -1153,81 +1206,41 @@ class SolarPanelModelSelector:
         """
         import pickle
         
-        with open(filepath, 'rb') as f:
-            model_package = pickle.load(f)
-        
-        self.best_model = model_package['model']
-        self.preprocessor = model_package['preprocessor']
-        self.label_encoders = model_package['label_encoders']
-        self.target_transformer = model_package['target_transformer']
-        self.imputer = model_package['imputer']
-        self.feature_cols = model_package['feature_names']
-        self.categorical_cols = model_package['categorical_cols']
-        self.numerical_cols = model_package['numerical_cols']
-        self.best_model_name = model_package.get('best_model_name', 'Unknown')
-        self.best_score = model_package.get('best_score', 0)
-        self.features_to_drop = model_package.get('features_to_drop', [])
-        self.best_results = model_package.get('best_results', {})
-        self.target_col = model_package.get('target_col', 'efficiency')
-        
-        print(f"✅ Model with complete pipeline loaded successfully")
-        print(f"   Model: {self.best_model_name}")
-        print(f"   Score: {self.best_score:.4f}")
-        
-    def run_complete_pipeline(self):
-        """
-        Run the complete model selection pipeline including stacking
-        """
-        print("🚀 STARTING COMPLETE SOLAR PANEL MODEL SELECTION PIPELINE")
-        print("="*70)
-        
         try:
-            # Step 1: Load and prepare data
-            print("\n📊 STEP 1: Data Loading and Preparation")
-            self.load_and_prepare_data()
+            with open(filepath, 'rb') as f:
+                model_package = pickle.load(f)
             
-            # Step 2: Create preprocessing pipeline
-            print("\n🔧 STEP 2: Creating Preprocessing Pipeline")
-            self.create_preprocessing_pipeline()
+            # Required attributes
+            required_attrs = ['model', 'preprocessor', 'target_transformer', 'imputer',
+                            'feature_names', 'categorical_cols', 'numerical_cols',
+                            'best_model_name', 'best_score', 'features_to_drop',
+                            'final_feature_names']
             
-            # Step 3: Prepare train-test split
-            print("\n✂️ STEP 3: Train-Test Split")
-            self.prepare_train_test_split()
+            # Check if all required attributes are present in the loaded package
+            missing_attrs = [attr for attr in required_attrs if attr not in model_package]
+            if missing_attrs:
+                raise ValueError(f"Missing required attributes in saved model: {', '.join(missing_attrs)}")
             
-            # Step 4: Define and evaluate base models
-            print("\n🤖 STEP 4: Base Model Evaluation")
-            self.define_models()
-            self.evaluate_base_models()
+            # Initialize all attributes
+            self.best_model = model_package['model']
+            self.preprocessor = model_package['preprocessor']
+            self.target_transformer = model_package['target_transformer']
+            self.imputer = model_package['imputer']
+            self.feature_cols = model_package['feature_names']
+            self.categorical_cols = model_package['categorical_cols']
+            self.numerical_cols = model_package['numerical_cols']
+            self.best_model_name = model_package['best_model_name']
+            self.best_score = model_package['best_score']
+            self.features_to_drop = model_package['features_to_drop']
+            self.final_feature_names = model_package['final_feature_names']
             
-            # Step 5: Hyperparameter tuning
-            print("\n⚙️ STEP 5: Hyperparameter Tuning")
-            self.hyperparameter_tuning(top_n=5)
+            print(f"✅ Model with complete pipeline loaded successfully: {self.best_model_name}")
+            print(f"   Score: {self.best_score:.4f}")
             
-            # Step 6: Create stacking models
-            print("\n🏗️ STEP 6: Stacking Model Creation")
-            self.create_stacking_models(n_best=2)
-            
-            # Step 7: Select best model
-            print("\n🎯 STEP 7: Best Model Selection")
-            self.select_best_model()
-            
-            # Step 8: Print comprehensive results
-            print("\n📊 STEP 8: Results Summary")
-            self.print_results_summary()
-            
-            # Step 9: Save best model
-            print("\n💾 STEP 9: Saving Best Model")
-            self.save_best_model()
-            
-            print("\n🎉 PIPELINE COMPLETED SUCCESSFULLY!")
-            print(f"🏆 Best Model: {self.best_model_name}")
-            print(f"📈 Final Test Score: {self.best_score:.4f}")
-            
-            return self.best_model, self.best_model_name, self.best_score
-            
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Model file not found: {filepath}")
         except Exception as e:
-            print(f"\n❌ PIPELINE FAILED: {str(e)}")
-            raise
+            raise Exception(f"Error loading model: {str(e)}")
 
 # Usage example and main execution
 if __name__ == "__main__":
@@ -1263,9 +1276,13 @@ if __name__ == "__main__":
         print("🚀 Starting complete pipeline...")
         best_model, best_model_name, best_score = selector.run_complete_pipeline()
         
+        # Select the best model explicitly
+        print("\n🎯 Selecting best model...")
+        selector.select_best_model()
+        
         print(f"\n🎊 FINAL RESULTS:")
-        print(f"   Best Model: {best_model_name}")
-        print(f"   Best Score: {best_score:.4f}")
+        print(f"   Best Model: {selector.best_model_name}")
+        print(f"   Best Score: {selector.best_score:.4f}")
         
         # Example of making predictions on new data
         print(f"\n📝 USAGE EXAMPLES:")

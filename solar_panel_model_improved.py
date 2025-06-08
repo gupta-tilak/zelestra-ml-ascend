@@ -563,7 +563,7 @@ class SolarPanelModelSelector:
             'CatBoost': CatBoostRegressor(random_state=self.random_state, verbose=False),
             'KNN': KNeighborsRegressor(),
             'SVR': SVR(),
-            'ANN': ANNRegressor(verbose=0)  # Use custom ANN wrapper
+            # 'ANN': ANNRegressor(verbose=0)  # Use custom ANN wrapper
         }
         
         return self.models
